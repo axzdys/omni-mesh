@@ -1,0 +1,19 @@
+{
+  "name": "omni-mesh",
+  "private": true,
+  "version": "1.0.0",
+  "description": "OmniMesh — distributed edge node command & automation scheduling hub (monorepo)",
+  "scripts": {
+    "build": "pnpm -r --filter './packages/*' run build",
+    "build:agent": "cd packages/agent && make all",
+    "build:dashboard": "pnpm --filter @omni/dashboard run build",
+    "test": "pnpm --filter @omni/control-plane run test && cd packages/agent && go test ./...",
+    "dev:cp": "pnpm --filter @omni/control-plane run dev",
+    "dev:dashboard": "pnpm --filter @omni/dashboard run dev",
+    "typecheck": "pnpm -r --filter './packages/*' run typecheck",
+    "deploy": "pnpm --filter @omni/control-plane run deploy"
+  },
+  "engines": {
+    "node": ">=20.11"
+  }
+}

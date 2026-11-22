@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-surface text-zinc-200 font-sans antialiased;
+    background-image: radial-gradient(ellipse 80% 40% at 50% -10%, rgba(34, 211, 238, 0.07), transparent),
+      radial-gradient(ellipse 60% 40% at 90% 110%, rgba(129, 140, 248, 0.06), transparent);
+    background-attachment: fixed;
+  }
+  ::selection {
+    @apply bg-cyan-500/30;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-xl border border-zinc-800/80 bg-surface-raised/70 shadow-panel;
+  }
+  .input {
+    @apply w-full rounded-lg border border-zinc-800 bg-zinc-900/80 px-3 py-2 text-sm text-zinc-200
+      placeholder:text-zinc-600 outline-none transition
+      focus:border-cyan-500/60 focus:ring-2 focus:ring-cyan-500/20;
+  }
+  .th {
+    @apply px-4 py-2.5 text-left text-[11px] font-medium uppercase tracking-wider text-zinc-500;
+  }
+  .td {
+    @apply px-4 py-2.5 text-sm text-zinc-300;
+  }
+}
+
+/* scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #27272a transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}
+
+/* xterm */
+.xterm .xterm-viewport {
+  background: transparent !important;
+  scrollbar-width: thin;
+}
+.xterm-screen {
+  padding: 6px 8px 10px 8px;
+}
+
+/* react-flow dark chrome */
+.react-flow__controls {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.react-flow__controls button {
+  background: #18181d;
+  border-bottom: 1px solid #27272a;
+  color: #a1a1aa;
+  fill: currentColor;
+  width: 26px;
+  height: 26px;
+  outline: none;
+}
+.react-flow__controls button:hover {
+  background: #26262c;
+  color: #e4e4e7;
+}
+.react-flow__controls button svg {
+  fill: currentColor;
+}
+.react-flow__minimap {
+  background-color: #121216 !important;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.react-flow__minimap svg {
+  background: #121216;
+}
+.react-flow__attribution {
+  display: none;
+}

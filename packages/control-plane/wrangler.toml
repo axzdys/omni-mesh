@@ -1,0 +1,48 @@
+# OmniMesh Control Plane — Cloudflare Workers configuration
+name = "omni-mesh-control-plane"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+workers_dev = true
+
+# ── D1 (SQLite): nodes / tasks / cron / workflows / audit / metrics ──
+[[d1_databases]]
+binding = "DB"
+database_name = "omni-mesh"
+database_id = "2ac6bfdc-05ad-4037-a1ab-256ee4f0702a"
+migrations_dir = "migrations"
+
+# ── R2: large execution log archive ──
+[[r2_buckets]]
+binding = "LOGS"
+bucket_name = "omni-mesh-logs"
+
+# ── Durable Objects: agent gateway / terminal bridge / log fanout / events / scheduler ──
+[durable_objects]
+bindings = [
+  { name = "AGENT_SESSION", class_name = "AgentSession" },
+  { name = "TERMINAL", class_name = "TerminalBridge" },
+  { name = "LOGHUB", class_name = "LogHub" },
+  { name = "EVENTS", class_name = "EventsHub" },
+  { name = "SCHEDULER", class_name = "Scheduler" },
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AgentSession", "TerminalBridge", "LogHub", "EventsHub", "Scheduler"]
+
+# ── Cron trigger: drives the scheduler DO every minute ──
+[triggers]
+crons = ["* * * * *"]
+
+# ── Static assets: dashboard SPA (built output of packages/dashboard) ──
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "none"
+
+# ── Secrets ──
+# Production: `wrangler secret put AUTH_SECRET` (>=32 random bytes),
+#   `wrangler secret put ADMIN_PASSWORD`, `wrangler secret put DEFAULT_REG_KEY`.
+# Local dev: create `.dev.vars` in this directory with the same three keys —
+# it is loaded by `wrangler dev` only and never deployed.
+# NOTE: never re-add these as [vars] — vars shadow secrets on every deploy.
