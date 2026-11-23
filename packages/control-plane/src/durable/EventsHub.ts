@@ -2,14 +2,15 @@
  * EventsHub — singleton DO ("events") holding every dashboard socket that
  * wants the global live event stream (node status, metrics, task/run updates,
  * alerts).
+ *
+ * Uses the WebSocket Hibernation API: idle dashboard sockets cost zero DO
+ * duration; the DO only wakes when a push arrives or a socket connects.
  */
 
 import type { DashEvent } from '@omni/shared';
 import type { Env } from '../env';
 
 export class EventsHub {
-  private sockets = new Set<WebSocket>();
-
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   constructor(private state: DurableObjectState, private env: Env) {}
 
@@ -18,13 +19,9 @@ export class EventsHub {
 
     if (url.pathname === '/ws') {
       const pair = new WebSocketPair();
-      const server = pair[1];
-      server.accept();
-      this.sockets.add(server);
-      server.addEventListener('close', () => this.sockets.delete(server));
-      server.addEventListener('error', () => this.sockets.delete(server));
+      this.state.acceptWebSocket(pair[1], ['dash']);
       try {
-        server.send(JSON.stringify({ type: 'hello', data: { ts: Date.now() } } satisfies DashEvent));
+        pair[1].send(JSON.stringify({ type: 'hello', data: { ts: Date.now() } } satisfies DashEvent));
       } catch {
         /* noop */
       }
@@ -33,7 +30,7 @@ export class EventsHub {
 
     if (url.pathname === '/push' && request.method === 'POST') {
       const frame = await request.text();
-      for (const ws of this.sockets) {
+      for (const ws of this.state.getWebSockets('dash')) {
         try {
           ws.send(frame);
         } catch {

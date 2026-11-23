@@ -28,8 +28,11 @@ export function buildApp() {
     if (!bootstrapped) {
       try {
         await ensureBootstrap(c.env.DB, c.env);
-        await schedulerStub(c.env).fetch('https://scheduler.internal/kick', { method: 'POST' });
         bootstrapped = true;
+        // scheduler kick is best-effort: a failure (e.g. DO duration quota
+        // exceeded for the day) must not force a bootstrap retry per request
+        await schedulerStub(c.env).fetch('https://scheduler.internal/kick', { method: 'POST' })
+          .catch((e) => console.error('scheduler kick failed (non-fatal):', e instanceof Error ? e.message : e));
       } catch (e) {
         console.error('bootstrap failed, will retry on next request:', e instanceof Error ? e.message : e);
       }

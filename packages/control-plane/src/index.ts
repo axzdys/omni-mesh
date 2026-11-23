@@ -17,7 +17,17 @@ const app = buildApp();
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    return app.fetch(request, env, ctx);
+    try {
+      return await app.fetch(request, env, ctx);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const stack = e instanceof Error ? (e.stack ?? '').slice(0, 800) : '';
+      console.error('worker fetch error:', msg, stack);
+      return new Response(JSON.stringify({ ok: false, error: msg, stack }), {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
   },
 
   async scheduled(_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {

@@ -31,6 +31,7 @@ type Result struct {
 	Signal     *string
 	DurationMs int64
 	Error      string
+	Log        []byte // combined stdout+stderr (capped at maxResultLog)
 }
 
 // StreamFn receives stdout/stderr chunks ("out"/"err").
@@ -39,6 +40,9 @@ type StreamFn func(stream string, data []byte)
 const (
 	chunkSize    = 32 * 1024
 	maxBuffered  = 64 * 1024 * 1024 // safety cap per stream
+	// maxResultLog caps the combined log shipped in EXEC_RESULT: after base64
+	// it must stay well under the 1MiB WebSocket message limit.
+	maxResultLog = 512 * 1024
 )
 
 // Executor runs commands.
@@ -108,15 +112,37 @@ func (e *Executor) Run(req ExecRequest, stream StreamFn) Result {
 		return Result{TaskID: req.TaskID, Error: err.Error(), DurationMs: ms(start)}
 	}
 
+	// accumulate a capped copy of the combined output for EXEC_RESULT while
+	// still streaming every chunk upstream
+	var logMu sync.Mutex
+	var logBuf []byte
+	wrappedStream := func(s string, data []byte) {
+		logMu.Lock()
+		if len(logBuf) < maxResultLog {
+			room := maxResultLog - len(logBuf)
+			if len(data) > room {
+				data = data[:room]
+			}
+			logBuf = append(logBuf, data...)
+		}
+		logMu.Unlock()
+		if stream != nil {
+			stream(s, data)
+		}
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); pump(stdout, "out", stream) }()
-	go func() { defer wg.Done(); pump(stderr, "err", stream) }()
+	go func() { defer wg.Done(); pump(stdout, "out", wrappedStream) }()
+	go func() { defer wg.Done(); pump(stderr, "err", wrappedStream) }()
 
 	waitErr := cmd.Wait()
 	wg.Wait()
 
 	res := Result{TaskID: req.TaskID, DurationMs: ms(start)}
+	logMu.Lock()
+	res.Log = logBuf
+	logMu.Unlock()
 	if ctx.Err() == context.DeadlineExceeded {
 		res.Error = "timeout"
 		return res

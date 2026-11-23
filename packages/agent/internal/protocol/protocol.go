@@ -110,6 +110,7 @@ type ExecResultPayload struct {
 	Signal     *string `json:"signal,omitempty"`
 	DurationMs int64   `json:"durationMs"`
 	Error      string  `json:"error,omitempty"`
+	LogB64     string  `json:"logB64,omitempty"` // combined stdout+stderr (capped, base64)
 }
 
 type ExecCancelPayload struct {

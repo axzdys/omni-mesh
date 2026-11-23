@@ -88,7 +88,11 @@ apiRoutes.get('/overview/history', async (c) => {
 // ─── Nodes ───────────────────────────────────────────────────────────────
 
 apiRoutes.get('/nodes', async (c) => {
-  return ok(await listNodes(c.env.DB));
+  try {
+    return ok(await listNodes(c.env.DB));
+  } catch (e) {
+    return c.json({ ok: false, error: e instanceof Error ? e.message : String(e), stack: e instanceof Error ? (e.stack ?? '').slice(0, 500) : undefined }, 500);
+  }
 });
 
 apiRoutes.get('/nodes/:id', async (c) => {

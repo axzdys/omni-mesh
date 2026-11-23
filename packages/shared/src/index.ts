@@ -97,6 +97,7 @@ export interface ExecResultPayload {
   signal?: string | null;
   durationMs: number;
   error?: string;
+  logB64?: string; // full accumulated stdout+stderr (base64) for archiving
 }
 
 export interface ExecCancelPayload {

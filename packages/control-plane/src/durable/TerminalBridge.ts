@@ -2,6 +2,10 @@
  * TerminalBridge — one DO per WebSSH session (name = ptyId). Bridges the
  * browser WebSocket to the agent's PTY through the node's AgentSession DO.
  *
+ * Uses the WebSocket Hibernation API: the browser socket is accepted with
+ * `state.acceptWebSocket()` and session metadata is stored as a socket
+ * attachment, so an idle terminal costs zero DO duration.
+ *
  * Browser → server:  binary frames = PTY stdin bytes; text JSON = ctl
  * Server → browser:  binary frames = PTY stdout bytes; text JSON = ctl
  */
@@ -10,13 +14,14 @@ import type { Env } from '../env';
 import { agentStub, clientIp } from '../util';
 import { audit, closeTerminalSession } from '../db';
 
-export class TerminalBridge {
-  private browserWs: WebSocket | null = null;
-  private ptyId: string | null = null;
-  private nodeId: string | null = null;
-  private actor = 'anonymous';
-  private open = false;
+interface BridgeAttachment {
+  nodeId: string;
+  ptyId: string;
+  actor: string;
+  open: boolean;
+}
 
+export class TerminalBridge {
   constructor(private state: DurableObjectState, private env: Env) {}
 
   async fetch(request: Request): Promise<Response> {
@@ -25,10 +30,10 @@ export class TerminalBridge {
 
     if (url.pathname === '/agent-data' && request.method === 'POST') {
       const buf = await request.arrayBuffer();
-      
-      if (this.browserWs && this.open) {
+      const ws = this.browserSocket();
+      if (ws) {
         try {
-          this.browserWs.send(buf);
+          ws.send(buf);
         } catch {
           /* browser gone */
         }
@@ -38,55 +43,66 @@ export class TerminalBridge {
 
     if (url.pathname === '/agent-closed' && request.method === 'POST') {
       const { reason } = (await request.json()) as { reason: string };
-      this.notifyClosed(reason);
+      const ws = this.browserSocket();
+      if (ws) {
+        try {
+          ws.send(JSON.stringify({ type: 'closed', reason }));
+        } catch {
+          /* noop */
+        }
+        this.setOpen(ws, false);
+      }
       return new Response('ok');
     }
 
     return new Response('not found', { status: 404 });
   }
 
+  // ─── Hibernation lifecycle (browser side) ───────────────────────────────
+
+  async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
+    const att = ws.deserializeAttachment() as BridgeAttachment | undefined;
+    if (!att?.open) return;
+    try {
+      if (typeof message === 'string') {
+        await this.handleCtl(att, ws, message);
+      } else {
+        await agentStub(this.env, att.nodeId)
+          .fetch('https://agent.internal/pty-input', {
+            method: 'POST',
+            body: message,
+            headers: { 'content-type': 'application/octet-stream', 'x-omni-pty': att.ptyId },
+          })
+          .catch(() => {});
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): Promise<void> {
+    await this.teardown(ws, 'client disconnected');
+  }
+
+  async webSocketError(ws: WebSocket, _error: unknown): Promise<void> {
+    await this.teardown(ws, 'client error');
+  }
+
+  // ─── Browser connection setup ───────────────────────────────────────────
+
   private async handleBrowserWs(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    this.nodeId = url.searchParams.get('nodeId') ?? '';
+    const nodeId = url.searchParams.get('nodeId') ?? '';
     // ptyId doubles as this bridge's DO name so PTY frames route back here
-    this.ptyId = url.searchParams.get('ptyId') ?? this.state.id.toString();
-    this.actor = url.searchParams.get('actor') ?? 'anonymous';
+    const ptyId = url.searchParams.get('ptyId') ?? this.state.id.toString();
+    const actor = url.searchParams.get('actor') ?? 'anonymous';
     const cols = parseInt(url.searchParams.get('cols') ?? '80', 10) || 80;
     const rows = parseInt(url.searchParams.get('rows') ?? '24', 10) || 24;
     const shell = url.searchParams.get('shell') ?? undefined;
 
     const pair = new WebSocketPair();
-    const server = pair[1];
-    server.accept();
-    this.browserWs = server;
-
-    server.addEventListener('message', (ev: MessageEvent) => {
-      if (!this.open) return;
-      try {
-        if (typeof ev.data === 'string') {
-          void this.handleCtl(ev.data).catch(() => {});
-        } else if (ev.data instanceof ArrayBuffer) {
-
-          void agentStub(this.env, this.nodeId!)
-            .fetch('https://agent.internal/pty-input', {
-              method: 'POST',
-              body: ev.data,
-              headers: { 'content-type': 'application/octet-stream', 'x-omni-pty': this.ptyId! },
-            })
-            .catch(() => {});
-        }
-      } catch {
-        /* ignore */
-      }
-    });
-
-    server.addEventListener('close', () => {
-      void this.teardown('client disconnected');
-    });
-
-    server.addEventListener('error', () => {
-      void this.teardown('client error');
-    });
+    this.state.acceptWebSocket(pair[1], ['browser']);
+    pair[1].serializeAttachment({ nodeId, ptyId, actor, open: false } satisfies BridgeAttachment);
 
     // Open the PTY on the agent (retry briefly to ride out agent reconnects)
     let opened = false;
@@ -96,9 +112,9 @@ export class TerminalBridge {
         await new Promise((r) => setTimeout(r, 1500));
       }
       try {
-        const res = await agentStub(this.env, this.nodeId).fetch('https://agent.internal/pty-attach', {
+        const res = await agentStub(this.env, nodeId).fetch('https://agent.internal/pty-attach', {
           method: 'POST',
-          body: JSON.stringify({ ptyId: this.ptyId, cols, rows, shell }),
+          body: JSON.stringify({ ptyId, cols, rows, shell }),
         });
         if (res.ok) {
           opened = true;
@@ -111,29 +127,45 @@ export class TerminalBridge {
       }
     }
     if (opened) {
-      this.open = true;
-      this.sendCtl({ type: 'open', ok: true });
+      this.setOpen(pair[1], true);
+      this.sendCtl(pair[1], { type: 'open', ok: true });
       await this.env.DB.prepare(
         'INSERT INTO terminal_sessions (id, node_id, actor, opened_at) VALUES (?, ?, ?, ?)',
       )
-        .bind(this.ptyId, this.nodeId, this.actor, Date.now())
+        .bind(ptyId, nodeId, actor, Date.now())
         .run();
       await audit(this.env.DB, {
-        actor: this.actor,
+        actor,
         action: 'terminal.open',
-        target: this.nodeId,
-        nodeId: this.nodeId,
+        target: nodeId,
+        nodeId,
         ip: clientIp(request),
       });
     } else {
-      this.sendCtl({ type: 'open', ok: false, reason: lastErr });
-      await this.teardown('agent offline');
+      this.sendCtl(pair[1], { type: 'open', ok: false, reason: lastErr });
+      await this.teardown(pair[1], 'agent offline');
     }
 
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
-  private async handleCtl(raw: string): Promise<void> {
+  // ─── helpers ────────────────────────────────────────────────────────────
+
+  private browserSocket(): WebSocket | null {
+    const sockets = this.state.getWebSockets('browser');
+    return sockets.length > 0 ? sockets[0] : null;
+  }
+
+  private setOpen(ws: WebSocket, open: boolean): void {
+    try {
+      const att = ws.deserializeAttachment() as BridgeAttachment | undefined;
+      if (att) ws.serializeAttachment({ ...att, open });
+    } catch {
+      /* noop */
+    }
+  }
+
+  private async handleCtl(att: BridgeAttachment, ws: WebSocket, raw: string): Promise<void> {
     let ctl: { type: string; cols?: number; rows?: number };
     try {
       ctl = JSON.parse(raw);
@@ -141,54 +173,53 @@ export class TerminalBridge {
       return;
     }
     if (ctl.type === 'ping') {
-      this.sendCtl({ type: 'pong' });
+      this.sendCtl(ws, { type: 'pong' });
       return;
     }
     if (ctl.type === 'resize' && ctl.cols && ctl.rows) {
-      await agentStub(this.env, this.nodeId!).fetch('https://agent.internal/pty-resize', {
-        method: 'POST',
-        body: JSON.stringify({ ptyId: this.ptyId, cols: ctl.cols, rows: ctl.rows }),
-      });
+      await agentStub(this.env, att.nodeId)
+        .fetch('https://agent.internal/pty-resize', {
+          method: 'POST',
+          body: JSON.stringify({ ptyId: att.ptyId, cols: ctl.cols, rows: ctl.rows }),
+        })
+        .catch(() => {});
       return;
     }
     if (ctl.type === 'close') {
-      await this.teardown('client requested close');
+      await this.teardown(ws, 'client requested close');
     }
   }
 
-  private sendCtl(ctl: { type: string; ok?: boolean; reason?: string }): void {
+  private sendCtl(ws: WebSocket, ctl: { type: string; ok?: boolean; reason?: string }): void {
     try {
-      this.browserWs?.send(JSON.stringify(ctl));
+      ws.send(JSON.stringify(ctl));
     } catch {
       /* noop */
     }
   }
 
-  private notifyClosed(reason: string): void {
-    this.sendCtl({ type: 'closed', reason });
-    this.open = false;
-  }
-
-  private async teardown(reason: string): Promise<void> {
-    if (!this.open && !this.browserWs) return;
-    this.open = false;
-    const ws = this.browserWs;
-    this.browserWs = null;
+  private async teardown(ws: WebSocket, reason: string): Promise<void> {
+    const att = (ws.deserializeAttachment() as BridgeAttachment | undefined) ?? null;
+    if (!att || (!att.open && !this.browserSocket())) {
+      try { ws.close(1000, reason); } catch { /* noop */ }
+      return;
+    }
+    this.setOpen(ws, false);
     try {
-      ws?.close(1000, reason);
+      ws.close(1000, reason);
     } catch {
       /* noop */
     }
-    if (this.ptyId && this.nodeId) {
-      await agentStub(this.env, this.nodeId)
-        .fetch('https://agent.internal/pty-close', { method: 'POST', body: JSON.stringify({ ptyId: this.ptyId }) })
+    if (att.ptyId && att.nodeId) {
+      await agentStub(this.env, att.nodeId)
+        .fetch('https://agent.internal/pty-close', { method: 'POST', body: JSON.stringify({ ptyId: att.ptyId }) })
         .catch(() => {});
-      await closeTerminalSession(this.env.DB, this.ptyId).catch(() => {});
+      await closeTerminalSession(this.env.DB, att.ptyId).catch(() => {});
       await audit(this.env.DB, {
-        actor: this.actor,
+        actor: att.actor,
         action: 'terminal.close',
-        target: this.nodeId,
-        nodeId: this.nodeId,
+        target: att.nodeId,
+        nodeId: att.nodeId,
         detail: reason,
       }).catch(() => {});
     }

@@ -127,6 +127,9 @@ func (a *Agent) startExecTask(p protocol.ExecReqPayload) {
 			DurationMs: res.DurationMs,
 			Error:      res.Error,
 		}
+		if len(res.Log) > 0 {
+			res2.LogB64 = base64.StdEncoding.EncodeToString(res.Log)
+		}
 		env, _ := protocol.NewEnvelope(protocol.TypeExecResult, res2)
 		if err := a.sendEnvelope(env); err != nil {
 			log.Printf("[agent] send result: %v", err)
